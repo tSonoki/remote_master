@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.webgpu.min.js"></script>
+    <script type="module" src="./offer.js" defer></script>
+    <meta charset="utf-8" />
+    <title>WebRTC Peer Connection Sample</title>
+    <style>
+      video {
+        width: 300px;
+        height: 200px;
+        background-color: black;
+        margin: 0 10px;
+      }
+      canvas {
+        border: 2px solid #333;
+        max-width: 100%;
+        height: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>WebRTC Peer Connection Sample</h1>
+    <video id="remote-video" autoplay playsinline></video>
+    <br />
+    <button id="send-sdp-by-ws">Send SDP</button>
+    SelectVideoCodec:<select id="video-codec-select">
+      <option value="AV1">AV1</option>
+      <option value="VP9">VP9</option>
+      <option value="H264">H264</option>
+      <option value="VP8">VP8</option>
+    </select>
+    <br />
+    <table>
+      <h2>Controller Info</h2>
+      <tr>
+        <th>SetRemoteCont:<span id="set-remote-cont"></span></th>
+      </tr>
+      <tr>
+        <th>SetSteer:<span id="set-steer"></span>deg(-100~100)</th>
+      </tr>
+      <th>SetGear:<span id="set-gear"></span></th>
+      <tr>
+        <th>SetRpm:<span id="set-rpm"></span>rpm</th>
+      </tr>
+      <tr>
+        <th>SetShuttle:<span id="set-shuttle"></span></th>
+      </tr>
+      <tr>
+        <th>SetHorn:<span id="set-horn"></span></th>
+      </tr>
+      <tr>
+        <th>SetPto:<span id="set-pto"></span></th>
+      </tr>
+      <tr>
+        <th>SetLinkHeight:<span id="set-link-height"></span>%UP</th>
+      </tr>
+      <tr>
+        <th>SetSpeed:<span id="set-speed"></span>km/h</th>
+      </tr>
+    </table>
+    <br />
+    <button id="save-delay-log">遅延ログを保存する</button>
+    <br />
+
+    VideoHeight:<input
+      type="number"
+      id="set-video-height"
+      max="4320"
+      value="1080"
+    /><br />
+    VideoWidth:<input
+      type="number"
+      id="set-video-width"
+      max="7680"
+      value="1920"
+    /><br />
+    FrameRate:<input
+      type="number"
+      id="set-video-framerate"
+      min="1"
+      max="60"
+      value="30"
+    />Hz<br />
+    bitrate:<input
+      type="number"
+      id="set-video-bitrate"
+      min="1"
+      max="1000000"
+      value="1000000"
+    />bps<br />
+    <button id="set-video-quality">SetVideoQuality</button>
+    <br />
+    <canvas id="video-canvas" hidden></canvas>
+    <canvas id="video-canvas-sonoki" hidden></canvas>
+    <button id="fullcanvas-trigger">Canvas Full Screen</button>
+    
+    <h2>ONNX Inference Control</h2>
+    <input type="radio" id="inference-on" name="inference-control" value="on" checked>
+    <label for="inference-on">推論オン</label>
+    <input type="radio" id="inference-off" name="inference-control" value="off">
+    <label for="inference-off">推論オフ</label><br><br>
+    
+    <h2>Detection Canvas (1920x1080)</h2>
+    <canvas id="large-detection-canvas" width="1920" height="1080"></canvas>
+  </body>
+</html>

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.webgpu.min.js"></script>
+    <script type="module" src="./answer.js" defer></script>
+  <meta charset="utf-8">
+  <title>WebRTC Peer Connection Sample</title>
+  <style>
+    video {
+      width: 300px;
+      height: 200px;
+      background-color: black;
+      margin: 0 10px;
+    }
+    canvas {
+      border: 2px solid #333;
+      max-width: 100%;
+      height: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>WebRTC Peer Connection Sample</h1>
+  <video id="local-video" autoplay playsinline></video>
+  <br>
+  SelectDevice:<select id="camera-select" disabled> </select><br>
+  VideoHeight:<input type="number" id="video-height" max="4320" value="1080"><br>
+  VideoWidth:<input type="number" id="video-width" max="7680" value="1920"><br>
+  FrameRate:<input type="number" id="video-rate" min="1" max="60" value="30">Hz<br>
+  <button id="stream-capture">Get Capture</button><br>
+  <br>
+  <button id="save-delay-log">遅延ログを保存する</button>
+  <br><br>
+  
+  <h2>ONNX Inference Control</h2>
+  <input type="radio" id="inference-on" name="inference-control" value="on" checked>
+  <label for="inference-on">推論オン</label>
+  <input type="radio" id="inference-off" name="inference-control" value="off">
+  <label for="inference-off">推論オフ</label><br><br>
+  
+  <h2>Detection Canvas (1920x1080)</h2>
+  <canvas id="large-detection-canvas" width="1920" height="1080"></canvas>
+</body>
+</html>
