@@ -17,6 +17,20 @@
         max-width: 100%;
         height: auto;
       }
+      .status-enabled {
+        color: #008000;
+        font-weight: bold;
+        padding: 5px;
+        background-color: #e8f5e8;
+        border-radius: 3px;
+      }
+      .status-disabled {
+        color: #800000;
+        font-weight: bold; 
+        padding: 5px;
+        background-color: #f5e8e8;
+        border-radius: 3px;
+      }
     </style>
   </head>
   <body>
@@ -60,7 +74,8 @@
       </tr>
     </table>
     <br />
-    <button id="save-delay-log">遅延ログを保存する</button>
+    <button id="save-delay-log">詳細WebRTC統計を保存</button>
+    <button id="clear-stats">統計データクリア</button>
     <br />
 
     VideoHeight:<input
@@ -96,12 +111,18 @@
     <button id="fullcanvas-trigger">Canvas Full Screen</button>
     
     <h2>ONNX Inference Control</h2>
-    <input type="radio" id="inference-on" name="inference-control" value="on" checked>
+    <input type="radio" id="inference-on" name="inference-control" value="on">
     <label for="inference-on">推論オン</label>
-    <input type="radio" id="inference-off" name="inference-control" value="off">
-    <label for="inference-off">推論オフ</label><br><br>
+    <input type="radio" id="inference-off" name="inference-control" value="off" checked>
+    <label for="inference-off">推論オフ</label><br>
+    <div id="inference-status" class="status-disabled">状態: 推論無効</div>
+    <div id="detection-stats" style="font-size: 12px; color: #666; margin-top: 5px;">
+      検出統計: 待機中
+    </div><br>
     
     <h2>Detection Canvas (1920x1080)</h2>
-    <canvas id="large-detection-canvas" width="1920" height="1080"></canvas>
+    <input type="checkbox" id="canvas-toggle" onchange="toggleCanvas()">
+    <label for="canvas-toggle">Detection Canvas表示</label><br><br>
+    <canvas id="large-detection-canvas" width="1920" height="1080" style="display: none;"></canvas>
   </body>
 </html>

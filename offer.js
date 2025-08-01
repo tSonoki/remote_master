@@ -33,8 +33,43 @@ const video = document.getElementById('remote-video');
 let onnxEngine = null;
 let largeDetectionCanvas = null;
 let largeDetectionContext = null;
-let isInferenceEnabled = true; // 推論の有効/無効状態
+let isInferenceEnabled = false; // 推論の有効/無効状態（デフォルトオフ）
 let currentDetections = []; // 現在の検出結果を保存
+
+// ステータス表示更新
+function updateInferenceStatus(status) {
+  const statusElement = document.getElementById("inference-status");
+  if (statusElement) {
+    statusElement.textContent = `状態: ${status}`;
+    statusElement.className = isInferenceEnabled ? "status-enabled" : "status-disabled";
+  }
+}
+
+// 検出統計表示更新
+function updateDetectionStats() {
+  const statsElement = document.getElementById("detection-stats");
+  if (!statsElement || !onnxEngine) return;
+  
+  const perfStats = onnxEngine.getPerformanceStats();
+  const detectionStats = onnxEngine.getDetectionStats();
+  const currentDetectionCount = currentDetections ? currentDetections.length : 0;
+  const personCount = currentDetections ? currentDetections.filter(d => d.classId === 0).length : 0;
+  
+  statsElement.textContent = `検出統計: 人${personCount}名 | 推論${perfStats.totalInferences}回 | 平均${perfStats.averageTime.toFixed(1)}ms | スキップ率${perfStats.skipRate?.toFixed(1) || 0}%`;
+}
+
+// Canvas表示制御（軽量化のため）
+let isCanvasVisible = false;
+function toggleCanvas() {
+  const canvas = document.getElementById("large-detection-canvas");
+  const checkbox = document.getElementById("canvas-toggle");
+  isCanvasVisible = checkbox.checked;
+  canvas.style.display = isCanvasVisible ? "block" : "none";
+  console.log(`Detection Canvas ${isCanvasVisible ? "表示" : "非表示"}`);
+}
+
+// グローバル関数として登録
+window.toggleCanvas = toggleCanvas;
 
 // Initialize ONNX model with WebGPU acceleration
 async function initONNXModel() {
@@ -156,7 +191,8 @@ async function runInference(videoElement) {
 // Performance monitoring variables for offer side
 let inferenceCount = 0;
 let totalInferenceTime = 0;
-let dynamicInterval = 33; // Start with 33ms (30 FPS)
+let dynamicInterval = 100; // Start with 100ms (10 FPS) - 軽量化
+let isInferenceBusy = false; // 推論処理中フラグ
 
 // Start continuous inference on received video stream with adaptive FPS
 function startVideoInference(videoElement) {
@@ -164,33 +200,60 @@ function startVideoInference(videoElement) {
     if (videoElement && videoElement.videoWidth > 0) {
       const startTime = performance.now();
 
-      // Stream video to large canvas
-      streamToCanvas(videoElement, largeDetectionCanvas, largeDetectionContext);
+      // Stream video to large canvas (表示時のみ実行で軽量化)
+      if (isCanvasVisible) {
+        streamToCanvas(videoElement, largeDetectionCanvas, largeDetectionContext);
+      }
 
-      // Only run inference if enabled
-      if (isInferenceEnabled) {
-        const results = await runInference(videoElement);
-        if (results && results.detections) {
-          // Update current detections for video-canvas rendering
-          currentDetections = results.detections;
-          
-          // Draw bounding boxes on large canvas
-          drawBoundingBoxesOnLargeCanvas(results.detections);
+      // Only run inference if enabled and not already busy
+      if (isInferenceEnabled && !isInferenceBusy) {
+        isInferenceBusy = true;
+        try {
+          const results = await runInference(videoElement);
+          if (results && results.detections) {
+            // Update current detections for video-canvas rendering
+            currentDetections = results.detections;
+            
+            // リアルタイム統計表示更新（30フレームごと）
+            if (inferenceCount % 30 === 0) {
+              updateDetectionStats();
+            }
+            
+            // Draw bounding boxes on large canvas（表示時のみ）
+            if (isCanvasVisible) {
+              drawBoundingBoxesOnLargeCanvas(results.detections);
+            }
 
-          // Send results through WebRTC data channel
-          if (dataChannel && dataChannel.readyState === "open") {
-            dataChannel.send(
-              JSON.stringify({
-                type: "offerInferenceResults",
-                payload: {
-                  timestamp: Date.now(),
-                  detectionsCount: results.detections.length,
-                  detections: results.detections,
-                  fps: (1000 / dynamicInterval).toFixed(1),
-                },
-              })
-            );
+            // Send results through WebRTC data channel (効率化とデータ削減)
+            if (dataChannel && dataChannel.readyState === "open") {
+              // 人検出のみに絞って送信（classId === 0）
+              const personDetections = results.detections.filter(d => d.classId === 0);
+              
+              if (personDetections.length > 0) {
+                const optimizedDetections = personDetections.map(d => ([
+                  Math.round(d.bbox.x), Math.round(d.bbox.y), 
+                  Math.round(d.bbox.width), Math.round(d.bbox.height),
+                  Math.round(d.confidence * 1000) // 0-1000の整数値
+                ]));
+                
+                // コンパクトなフォーマットで送信
+                const compactMessage = {
+                  t: "offer_detect", // type短縮
+                  ts: Date.now(),
+                  d: optimizedDetections, // detections
+                  c: personDetections.length // count
+                };
+                
+                try {
+                  dataChannel.send(JSON.stringify(compactMessage));
+                } catch (sendError) {
+                  console.warn("Failed to send detection data:", sendError.message);
+                }
+              }
+            }
           }
+        } finally {
+          isInferenceBusy = false;
         }
       } else {
         // Clear detection displays when inference is disabled
@@ -214,13 +277,18 @@ function startVideoInference(videoElement) {
           )}ms, Actual FPS: ${actualFPS.toFixed(1)}`
         );
 
-        // Adaptive interval adjustment for WebGPU
-        if (avgInferenceTime < 20) {
-          dynamicInterval = Math.max(16, dynamicInterval - 2); // Up to 60 FPS
-        } else if (avgInferenceTime < 40) {
-          dynamicInterval = Math.max(33, dynamicInterval - 1); // Up to 30 FPS
-        } else if (avgInferenceTime > 80) {
-          dynamicInterval = Math.min(200, dynamicInterval + 10); // Down to 5 FPS
+        // Adaptive interval adjustment (より保守的)
+        if (avgInferenceTime < 50) {
+          dynamicInterval = Math.max(50, dynamicInterval - 5); // Up to 20 FPS
+        } else if (avgInferenceTime < 100) {
+          dynamicInterval = Math.max(100, dynamicInterval - 2); // Up to 10 FPS
+        } else if (avgInferenceTime > 200) {
+          dynamicInterval = Math.min(500, dynamicInterval + 25); // Down to 2 FPS
+        }
+        
+        // ONNXエンジンの推論間隔も調整
+        if (onnxEngine) {
+          onnxEngine.adjustInferenceInterval(avgInferenceTime);
         }
 
         totalInferenceTime = 0;
@@ -228,8 +296,12 @@ function startVideoInference(videoElement) {
       }
     }
 
-    // Schedule next inference
-    setTimeout(inferenceLoop, dynamicInterval);
+    // Schedule next inference (requestAnimationFrame使用でブラウザに最適化を委ねる)
+    if (isInferenceEnabled) {
+      setTimeout(inferenceLoop, dynamicInterval);
+    } else {
+      setTimeout(inferenceLoop, 100); // 推論オフ時は軽量チェック
+    }
   }
 
   // Start the inference loop
@@ -383,6 +455,7 @@ async function startConnection() {
         if (inferenceOnRadio.checked) {
           isInferenceEnabled = true;
           console.log("Offer side inference enabled");
+          updateInferenceStatus("推論有効");
         }
       });
       
@@ -391,8 +464,16 @@ async function startConnection() {
           isInferenceEnabled = false;
           currentDetections = [];
           console.log("Offer side inference disabled");
+          updateInferenceStatus("推論無効");
+          // メモリクリーンアップ
+          if (onnxEngine) {
+            onnxEngine.cleanupMemory();
+          }
         }
       });
+      
+      // 初期状態表示
+      updateInferenceStatus("推論無効");
     });
   };
 
@@ -420,138 +501,271 @@ document
   .getElementById("send-sdp-by-ws")
   .addEventListener("click", startConnection);
 
-// ===== ここから遅延ログ機能 (詳細版) =====
-const delayLogs = [];
+// ===== ここから詳細WebRTC統計ログ機能 =====
+const webrtcStatsLogs = [];
+
 // 前回の値記録用
 let prevFramesDecoded = null, prevFramesDecodedTime = null;
 let prevFramesReceived = null, prevFramesReceivedTime = null;
+let prevPacketsReceived = null, prevPacketsTime = null;
+let prevBytesReceived = null, prevBytesTime = null;
 
-setInterval(async function debugRTCStats() {
+// 統一されたログスキーマを作成する関数
+function createUnifiedLogEntry() {
+  const now = new Date();
+  const isoTimestamp = now.toISOString();
+  
+  return {
+    // 基本情報（共通）
+    timestamp: isoTimestamp,
+    time_formatted: now.toLocaleTimeString('ja-JP'),
+    side: 'offer',
+    session_id: peerConnection ? peerConnection._sessionId || 'unknown' : 'no_connection',
+    
+    // 接続状態（共通）
+    connection_state: peerConnection ? peerConnection.connectionState : 'unknown',
+    ice_connection_state: peerConnection ? peerConnection.iceConnectionState : 'unknown',
+    ice_gathering_state: peerConnection ? peerConnection.iceGatheringState : 'unknown',
+    
+    // アプリケーション状態（共通）
+    inference_enabled: isInferenceEnabled,
+    canvas_visible: isCanvasVisible,
+    
+    // Video品質（Offer側：受信統計）
+    frame_width: 0,
+    frame_height: 0,
+    frames_per_second: 0,
+    frames_received: 0,
+    frames_decoded: 0,
+    frames_dropped: 0,
+    frames_sent: 0, // Answer側で使用
+    frames_encoded: 0, // Answer側で使用
+    key_frames_decoded: 0,
+    key_frames_encoded: 0, // Answer側で使用
+    
+    // 品質メトリクス
+    actual_fps_received: 0,
+    actual_fps_decoded: 0,
+    actual_fps_sent: 0, // Answer側で使用
+    actual_fps_encoded: 0, // Answer側で使用
+    avg_decode_time_ms: 0,
+    avg_encode_time_ms: 0, // Answer側で使用
+    total_decode_time_ms: 0,
+    total_encode_time_ms: 0, // Answer側で使用
+    
+    // ジッターバッファ（主にOffer側）
+    jitter_buffer_delay_ms: 0,
+    jitter_buffer_emitted_count: 0,
+    avg_jitter_buffer_delay_ms: 0,
+    
+    // ネットワーク統計（共通）
+    jitter_ms: 0,
+    rtt_ms: 0,
+    packets_received: 0,
+    packets_sent: 0, // Answer側で使用
+    packets_lost: 0,
+    bytes_received: 0,
+    bytes_sent: 0, // Answer側で使用
+    header_bytes_received: 0,
+    packets_per_second: 0,
+    bitrate_kbps: 0,
+    target_bitrate: 0, // Answer側で使用
+    available_outgoing_bitrate: 0,
+    
+    // エラー統計（共通）
+    fir_count: 0,
+    pli_count: 0,
+    nack_count: 0,
+    retransmitted_packets_sent: 0, // Answer側で使用
+    retransmitted_bytes_sent: 0, // Answer側で使用
+    
+    // ONNX推論統計（共通）
+    avg_inference_time_ms: 0,
+    total_inferences: 0,
+    skipped_frames_inference: 0,
+    skip_rate_percent: 0,
+    min_inference_interval_ms: 0,
+    
+    // 検出結果統計（共通）
+    detections_count: 0,
+    detections_person_count: 0,
+    max_confidence: 0,
+    avg_confidence: 0
+  };
+}
+
+setInterval(async function collectDetailedWebRTCStats() {
   if (!peerConnection) return;
   const stats = await peerConnection.getStats();
 
-  const now = new Date();
-  const pad = n => n.toString().padStart(2, "0");
-  const timestamp = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-  
-  let logRow = {
-    timestamp,
-    "[jitter]": "",
-    "[packetsLost]": "",
-    "[jitterBufferDelay]": "",
-    "[jitterBufferEmittedCount]": "",
-    "[jitterBufferDelay/jitterBufferEmittedCount_in_ms]": "",
-    "[totalDecodeTime/framesDecoded_in_ms]": "",
-    "[framesReceived/s]": "",
-    "[interFrameDelayStDev_in_ms]": "",
-    "[totalInterFrameDelay/framesDecoded_in_ms]": "",
-    "[totalAssemblyTime/framesAssembledFromMultiplePackets_in_ms]": "",
-    "[totalProcessingDelay/jitterBufferEmittedCount_in_ms]": "",
-    "[framesDecoded/s]": "",
-    "[frameWidth]": "",
-    "[frameHeight]": "",
-    "[framesPerSecond]": ""
-  };
+  // 統一スキーマでログエントリを作成
+  let logEntry = createUnifiedLogEntry();
 
-  let inboundRtpReport;
+  let inboundRtpReport, candidatePairReport;
+  
   stats.forEach((report) => {
     if (report.type === "inbound-rtp" && report.kind === "video" && !report.isRemote) {
       inboundRtpReport = report;
+    } else if (report.type === "candidate-pair" && report.state === "succeeded") {
+      candidatePairReport = report;
     }
   });
 
+  // ONNX推論統計を追加
+  if (onnxEngine) {
+    const perfStats = onnxEngine.getPerformanceStats();
+    logEntry.avg_inference_time_ms = perfStats.averageTime || 0;
+    logEntry.total_inferences = perfStats.totalInferences || 0;
+    logEntry.skipped_frames_inference = perfStats.skippedFrames || 0;
+    logEntry.skip_rate_percent = perfStats.skipRate || 0;
+    logEntry.min_inference_interval_ms = onnxEngine.minInferenceInterval || 0;
+  }
+
+  // 現在の検出結果統計を追加
+  if (currentDetections && currentDetections.length > 0) {
+    logEntry.detections_count = currentDetections.length;
+    logEntry.detections_person_count = currentDetections.filter(d => d.classId === 0).length;
+    const confidences = currentDetections.map(d => d.confidence);
+    logEntry.max_confidence = Math.max(...confidences);
+    logEntry.avg_confidence = confidences.reduce((a, b) => a + b, 0) / confidences.length;
+  }
+
+  // Video品質とデコーディング統計
   if (inboundRtpReport) {
     const ts = inboundRtpReport.timestamp;
-    logRow["[jitter]"] = inboundRtpReport.jitter ?? "";
-    logRow["[packetsLost]"] = inboundRtpReport.packetsLost ?? "";
-    logRow["[jitterBufferDelay]"] = inboundRtpReport.jitterBufferDelay ?? "";
-    logRow["[jitterBufferEmittedCount]"] = inboundRtpReport.jitterBufferEmittedCount ?? "";
+    
+    logEntry.frame_width = inboundRtpReport.frameWidth || 0;
+    logEntry.frame_height = inboundRtpReport.frameHeight || 0;
+    logEntry.frames_per_second = inboundRtpReport.framesPerSecond || 0;
+    logEntry.frames_decoded = inboundRtpReport.framesDecoded || 0;
+    logEntry.frames_received = inboundRtpReport.framesReceived || 0;
+    logEntry.frames_dropped = inboundRtpReport.framesDropped || 0;
+    logEntry.key_frames_decoded = inboundRtpReport.keyFramesDecoded || 0;
+    logEntry.total_decode_time_ms = inboundRtpReport.totalDecodeTime ? 
+      parseFloat((inboundRtpReport.totalDecodeTime * 1000).toFixed(3)) : 0;
+    logEntry.avg_decode_time_ms = (inboundRtpReport.totalDecodeTime && inboundRtpReport.framesDecoded > 0) ? 
+      parseFloat(((inboundRtpReport.totalDecodeTime / inboundRtpReport.framesDecoded) * 1000).toFixed(3)) : 0;
+    logEntry.jitter_buffer_delay_ms = inboundRtpReport.jitterBufferDelay ? 
+      parseFloat((inboundRtpReport.jitterBufferDelay * 1000).toFixed(3)) : 0;
+    logEntry.jitter_buffer_emitted_count = inboundRtpReport.jitterBufferEmittedCount || 0;
+    logEntry.avg_jitter_buffer_delay_ms = (inboundRtpReport.jitterBufferDelay && inboundRtpReport.jitterBufferEmittedCount > 0) ?
+      parseFloat(((inboundRtpReport.jitterBufferDelay / inboundRtpReport.jitterBufferEmittedCount) * 1000).toFixed(3)) : 0;
 
-    if (inboundRtpReport.jitterBufferDelay && inboundRtpReport.jitterBufferEmittedCount > 0) {
-        logRow["[jitterBufferDelay/jitterBufferEmittedCount_in_ms]"] = (
-            (inboundRtpReport.jitterBufferDelay / inboundRtpReport.jitterBufferEmittedCount) * 1000
-        ).toFixed(3);
-    }
-    if (inboundRtpReport.totalInterFrameDelay && inboundRtpReport.framesDecoded > 0) {
-        logRow["[totalInterFrameDelay/framesDecoded_in_ms]"] = (
-            (inboundRtpReport.totalInterFrameDelay / inboundRtpReport.framesDecoded) * 1000
-        ).toFixed(3);
-    }
-    if (inboundRtpReport.totalSquaredInterFrameDelay && inboundRtpReport.framesDecoded > 1) {
-        const mean = inboundRtpReport.totalInterFrameDelay / inboundRtpReport.framesDecoded;
-        const variance = (inboundRtpReport.totalSquaredInterFrameDelay / inboundRtpReport.framesDecoded) - (mean ** 2);
-        logRow["[interFrameDelayStDev_in_ms]"] = (Math.sqrt(variance) * 1000).toFixed(3);
-    }
-    if (inboundRtpReport.totalProcessingDelay && inboundRtpReport.jitterBufferEmittedCount > 0) {
-        logRow["[totalProcessingDelay/jitterBufferEmittedCount_in_ms]"] = (
-            (inboundRtpReport.totalProcessingDelay / inboundRtpReport.jitterBufferEmittedCount) * 1000
-        ).toFixed(3);
-    }
-    logRow["[frameWidth]"] = inboundRtpReport.frameWidth ?? "";
-    logRow["[frameHeight]"] = inboundRtpReport.frameHeight ?? "";
-    logRow["[framesPerSecond]"] = inboundRtpReport.framesPerSecond ?? "";
+    // ネットワーク統計
+    logEntry.jitter_ms = inboundRtpReport.jitter ? 
+      parseFloat((inboundRtpReport.jitter * 1000).toFixed(3)) : 0;
+    logEntry.packets_received = inboundRtpReport.packetsReceived || 0;
+    logEntry.packets_lost = inboundRtpReport.packetsLost || 0;
+    logEntry.bytes_received = inboundRtpReport.bytesReceived || 0;
+    logEntry.header_bytes_received = inboundRtpReport.headerBytesReceived || 0;
+    logEntry.fir_count = inboundRtpReport.firCount || 0;
+    logEntry.pli_count = inboundRtpReport.pliCount || 0;
+    logEntry.nack_count = inboundRtpReport.nackCount || 0;
 
-    if (inboundRtpReport.totalDecodeTime !== undefined && inboundRtpReport.framesDecoded > 0) {
-        logRow["[totalDecodeTime/framesDecoded_in_ms]"] = (
-            (inboundRtpReport.totalDecodeTime / inboundRtpReport.framesDecoded) * 1000
-        ).toFixed(3);
-    }
-    if (inboundRtpReport.totalAssemblyTime !== undefined && inboundRtpReport.framesAssembledFromMultiplePackets > 0) {
-        logRow["[totalAssemblyTime/framesAssembledFromMultiplePackets_in_ms]"] = (
-            (inboundRtpReport.totalAssemblyTime / inboundRtpReport.framesAssembledFromMultiplePackets) * 1000
-        ).toFixed(3);
-    }
+    // フレームレート計算
     if (inboundRtpReport.framesReceived !== undefined) {
-        if (prevFramesReceived !== null && prevFramesReceivedTime !== null) {
-            const deltaTimeSec = (ts - prevFramesReceivedTime) / 1000;
-            const deltaFrames = inboundRtpReport.framesReceived - prevFramesReceived;
-            if (deltaTimeSec > 0) {
-                logRow["[framesReceived/s]"] = (deltaFrames / deltaTimeSec).toFixed(3);
-            }
+      if (prevFramesReceived !== null && prevFramesReceivedTime !== null) {
+        const deltaTimeSec = (ts - prevFramesReceivedTime) / 1000;
+        const deltaFrames = inboundRtpReport.framesReceived - prevFramesReceived;
+        if (deltaTimeSec > 0) {
+          logEntry.actual_fps_received = parseFloat((deltaFrames / deltaTimeSec).toFixed(3));
         }
-        prevFramesReceived = inboundRtpReport.framesReceived;
-        prevFramesReceivedTime = ts;
+      }
+      prevFramesReceived = inboundRtpReport.framesReceived;
+      prevFramesReceivedTime = ts;
     }
+
     if (inboundRtpReport.framesDecoded !== undefined) {
-        if (prevFramesDecoded !== null && prevFramesDecodedTime !== null) {
-            const deltaTimeSec = (ts - prevFramesDecodedTime) / 1000;
-            const deltaFrames = inboundRtpReport.framesDecoded - prevFramesDecoded;
-            if (deltaTimeSec > 0) {
-                logRow["[framesDecoded/s]"] = (deltaFrames / deltaTimeSec).toFixed(3);
-            }
+      if (prevFramesDecoded !== null && prevFramesDecodedTime !== null) {
+        const deltaTimeSec = (ts - prevFramesDecodedTime) / 1000;
+        const deltaFrames = inboundRtpReport.framesDecoded - prevFramesDecoded;
+        if (deltaTimeSec > 0) {
+          logEntry.actual_fps_decoded = parseFloat((deltaFrames / deltaTimeSec).toFixed(3));
         }
-        prevFramesDecoded = inboundRtpReport.framesDecoded;
-        prevFramesDecodedTime = ts;
+      }
+      prevFramesDecoded = inboundRtpReport.framesDecoded;
+      prevFramesDecodedTime = ts;
+    }
+
+    // パケットレート・ビットレート計算
+    if (inboundRtpReport.packetsReceived !== undefined) {
+      if (prevPacketsReceived !== null && prevPacketsTime !== null) {
+        const deltaTimeSec = (ts - prevPacketsTime) / 1000;
+        const deltaPackets = inboundRtpReport.packetsReceived - prevPacketsReceived;
+        if (deltaTimeSec > 0) {
+          logEntry.packets_per_second = parseFloat((deltaPackets / deltaTimeSec).toFixed(3));
+        }
+      }
+      prevPacketsReceived = inboundRtpReport.packetsReceived;
+      prevPacketsTime = ts;
+    }
+
+    if (inboundRtpReport.bytesReceived !== undefined) {
+      if (prevBytesReceived !== null && prevBytesTime !== null) {
+        const deltaTimeSec = (ts - prevBytesTime) / 1000;
+        const deltaBytes = inboundRtpReport.bytesReceived - prevBytesReceived;
+        if (deltaTimeSec > 0) {
+          logEntry.bitrate_kbps = parseFloat(((deltaBytes * 8) / 1000 / deltaTimeSec).toFixed(3));
+        }
+      }
+      prevBytesReceived = inboundRtpReport.bytesReceived;
+      prevBytesTime = ts;
     }
   }
 
-  delayLogs.push(logRow);
+  // RTT情報
+  if (candidatePairReport) {
+    logEntry.rtt_ms = candidatePairReport.currentRoundTripTime ? 
+      parseFloat((candidatePairReport.currentRoundTripTime * 1000).toFixed(3)) : 0;
+    logEntry.available_outgoing_bitrate = candidatePairReport.availableOutgoingBitrate || 0;
+  }
+
+  // 統一ログに保存
+  webrtcStatsLogs.push(logEntry);
+  
+  // メモリ使用量制限（最新1000エントリまで保持）
+  if (webrtcStatsLogs.length > 1000) {
+    webrtcStatsLogs.splice(0, webrtcStatsLogs.length - 1000);
+  }
 }, 1000);
 
-function saveDelayLogsAsCSV() {
-  if (delayLogs.length === 0) return;
-  const headers = Object.keys(delayLogs[0]);
-  const csv = [
-    headers.join(","),
-    ...delayLogs.map(row => headers.map(h => row[h] ?? "").join(","))
-  ].join("\n");
-
-  const blob = new Blob([csv], { type: "text/csv" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-
+// 統一WebRTC統計のCSV出力機能
+function saveDetailedWebRTCStats() {
   const now = new Date();
-  const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000); // 日本時間 (JST) に変換
+  const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
   const pad = n => n.toString().padStart(2, "0");
   const ts = `${jst.getUTCFullYear()}-${pad(jst.getUTCMonth() + 1)}-${pad(jst.getUTCDate())}_${pad(jst.getUTCHours())}-${pad(jst.getUTCMinutes())}-${pad(jst.getUTCSeconds())}`;
 
-  a.download = `offer_webrtc_delay_log_${ts}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
+  if (webrtcStatsLogs.length > 0) {
+    const headers = Object.keys(webrtcStatsLogs[0]);
+    const csv = [
+      headers.join(","),
+      ...webrtcStatsLogs.map(row => headers.map(h => row[h] ?? "").join(","))
+    ].join("\n");
+    
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `offer_webrtc_unified_stats_${ts}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    
+    console.log(`統一WebRTC統計を保存: ${webrtcStatsLogs.length}エントリ (${ts})`);
+  } else {
+    console.log("保存する統計データがありません");
+  }
 }
 
-document.getElementById("save-delay-log").addEventListener("click", saveDelayLogsAsCSV);
+// 統計データクリア機能
+function clearWebRTCStats() {
+  webrtcStatsLogs.length = 0;
+  console.log("WebRTC統計データをクリアしました");
+}
+
+// 詳細統計保存とクリアのイベントリスナー
+document.getElementById("save-delay-log").addEventListener("click", saveDetailedWebRTCStats);
+document.getElementById("clear-stats").addEventListener("click", clearWebRTCStats);
 // ===== 遅延ログ機能ここまで =====
 
 /**

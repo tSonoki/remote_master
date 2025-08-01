@@ -8,12 +8,21 @@ class ONNXInferenceEngine {
     this.inferenceContext = null;
     this.isWebGPUSupported = false;
     this.modelPath = './best.onnx';
+    this.lastInferenceTime = 0;
+    this.minInferenceInterval = 100; // 最小推論間隔（ms）
+    
+    // 検出結果の安定化フィルタ
+    this.detectionHistory = []; // 過去の検出結果を保存
+    this.maxHistoryLength = 5; // 保存する履歴の最大長
+    this.confidenceThreshold = 0.3; // 最小信頼度閾値
     
     // Performance monitoring
     this.performanceStats = {
       totalInferences: 0,
       totalTime: 0,
-      averageTime: 0
+      averageTime: 0,
+      skippedFrames: 0,
+      errorCount: 0
     };
   }
 
@@ -129,30 +138,25 @@ class ONNXInferenceEngine {
     return inputTensor;
   }
 
-  // Parse detection results - Updated for model format [1, 300, 6]
+  // Parse detection results with stability filtering
   parseDetectionResults(results) {
     const output = results.output0;
     if (!output) {
       console.log("Available output keys:", Object.keys(results));
-      return [];
+      return this.stabilizeDetections([]);
     }
 
     const outputData = output.data;
     const outputShape = output.dims; // [1, 300, 6] for your model
-    console.log("Output shape:", outputShape);
-    console.log("Output data length:", outputData.length);
-
-    const detections = [];
+    
+    const rawDetections = [];
     const numDetections = outputShape[1]; // 300
     const numFeatures = outputShape[2]; // 6 (x1, y1, x2, y2, confidence, class_id)
-
-    console.log(`Processing ${numDetections} detections with ${numFeatures} features each`);
 
     // Your model format: [x1, y1, x2, y2, confidence, class_id]
     for (let i = 0; i < numDetections; i++) {
       const startIdx = i * numFeatures;
 
-      // バウンディングボックス座標 (x1, y1, x2, y2形式)
       const x1 = outputData[startIdx + 0];
       const y1 = outputData[startIdx + 1];
       const x2 = outputData[startIdx + 2];
@@ -160,49 +164,143 @@ class ONNXInferenceEngine {
       const confidence = outputData[startIdx + 4];
       const classId = Math.round(outputData[startIdx + 5]);
 
-      // 信頼度閾値でフィルタ
-      if (confidence > 0.3) { // 0.3に下げて検出しやすく
-        // x1,y1,x2,y2 から width, height を計算
+      // 動的信頼度閾値でフィルタ（基本的な妥当性チェック付き）
+      if (confidence > this.confidenceThreshold && 
+          x1 >= 0 && y1 >= 0 && x2 > x1 && y2 > y1 && 
+          x2 <= 640 && y2 <= 640) {
+        
         const width = x2 - x1;
         const height = y2 - y1;
-
-        const detection = {
-          bbox: {
-            x: x1,
-            y: y1,
-            width: width,
-            height: height,
-          },
-          confidence: confidence,
-          classId: classId,
-          x1: x1,
-          y1: y1,
-          x2: x2,
-          y2: y2,
-        };
-
-        detections.push(detection);
-        console.log(`Valid detection ${detections.length-1}: x1=${x1.toFixed(1)}, y1=${y1.toFixed(1)}, x2=${x2.toFixed(1)}, y2=${y2.toFixed(1)}, conf=${confidence.toFixed(3)}, class=${classId}`);
+        
+        // 最小サイズフィルタ（ノイズ除去）
+        if (width > 10 && height > 10) {
+          const detection = {
+            bbox: { x: x1, y: y1, width: width, height: height },
+            confidence: confidence,
+            classId: classId,
+            x1: x1, y1: y1, x2: x2, y2: y2,
+            timestamp: Date.now()
+          };
+          rawDetections.push(detection);
+        }
       }
     }
 
-    return detections;
+    // 検出結果の安定化フィルタを適用
+    return this.stabilizeDetections(rawDetections);
   }
 
-  // Run ONNX inference on video frame
+  // 検出結果の安定化フィルタ
+  stabilizeDetections(currentDetections) {
+    // 履歴に現在の検出結果を追加
+    this.detectionHistory.push({
+      timestamp: Date.now(),
+      detections: currentDetections
+    });
+
+    // 履歴の長さを制限
+    if (this.detectionHistory.length > this.maxHistoryLength) {
+      this.detectionHistory.shift();
+    }
+
+    // 履歴が不十分な場合は現在の結果をそのまま返す
+    if (this.detectionHistory.length < 2) {
+      return currentDetections;
+    }
+
+    // 安定した検出結果をフィルタリング
+    const stableDetections = [];
+    
+    for (const detection of currentDetections) {
+      let stabilityCount = 0;
+      
+      // 過去の履歴で類似の検出があるかチェック
+      for (const historyEntry of this.detectionHistory.slice(-3)) { // 直近3フレームをチェック
+        for (const histDetection of historyEntry.detections) {
+          if (this.isSimilarDetection(detection, histDetection)) {
+            stabilityCount++;
+            break;
+          }
+        }
+      }
+      
+      // 少なくとも2回以上検出されているか、高い信頼度の場合は採用
+      if (stabilityCount >= 2 || detection.confidence > 0.7) {
+        stableDetections.push(detection);
+      }
+    }
+
+    return stableDetections;
+  }
+
+  // 2つの検出結果が類似しているかチェック
+  isSimilarDetection(det1, det2, threshold = 50) {
+    if (det1.classId !== det2.classId) return false;
+    
+    // バウンディングボックスの中心点距離で判定
+    const center1 = {
+      x: det1.x1 + (det1.x2 - det1.x1) / 2,
+      y: det1.y1 + (det1.y2 - det1.y1) / 2
+    };
+    const center2 = {
+      x: det2.x1 + (det2.x2 - det2.x1) / 2,
+      y: det2.y1 + (det2.y2 - det2.y1) / 2
+    };
+    
+    const distance = Math.sqrt(
+      Math.pow(center1.x - center2.x, 2) + 
+      Math.pow(center1.y - center2.y, 2)
+    );
+    
+    return distance < threshold;
+  }
+
+  // Run ONNX inference on video frame with frame skipping and error handling
   async runInference(videoElement, side = "unknown") {
-    if (!this.session || !videoElement || videoElement.videoWidth === 0) return null;
+    if (!this.session || !videoElement || videoElement.videoWidth === 0) {
+      return null;
+    }
+
+    // フレームスキッピング - 最小間隔をチェック
+    const currentTime = performance.now();
+    if (currentTime - this.lastInferenceTime < this.minInferenceInterval) {
+      this.performanceStats.skippedFrames++;
+      return null;
+    }
+    this.lastInferenceTime = currentTime;
+
+    // ビデオフレームの有効性チェック
+    if (videoElement.readyState < 2) { // HAVE_CURRENT_DATA
+      console.warn(`Video not ready for inference (readyState: ${videoElement.readyState})`);
+      return null;
+    }
 
     try {
       const startTime = performance.now();
       
       const inputTensor = this.preprocessFrame(videoElement);
-      if (!inputTensor) return null;
+      if (!inputTensor) {
+        console.warn("Failed to preprocess frame");
+        return null;
+      }
 
-      const tensor = new ort.Tensor('float32', inputTensor, [1, 3, 640, 640]);
-      const feeds = { images: tensor };
+      // テンソル作成時のエラーハンドリング
+      let tensor, feeds;
+      try {
+        tensor = new ort.Tensor('float32', inputTensor, [1, 3, 640, 640]);
+        feeds = { images: tensor };
+      } catch (tensorError) {
+        console.error(`Tensor creation failed: ${tensorError.message}`);
+        return null;
+      }
 
-      const results = await this.session.run(feeds);
+      // 推論実行（タイムアウト付き）
+      const results = await Promise.race([
+        this.session.run(feeds),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Inference timeout')), 5000)
+        )
+      ]);
       
       const endTime = performance.now();
       const inferenceTime = endTime - startTime;
@@ -250,14 +348,40 @@ class ONNXInferenceEngine {
         performanceStats: { ...this.performanceStats }
       };
     } catch (error) {
-      console.error(`ONNX inference failed on ${side} side:`, error);
+      console.error(`ONNX inference failed on ${side} side:`, {
+        message: error.message,
+        stack: error.stack?.split('\n').slice(0, 3).join('\n'),
+        timestamp: new Date().toISOString()
+      });
+      
+      // エラーカウンターを追加
+      this.performanceStats.errorCount = (this.performanceStats.errorCount || 0) + 1;
+      
+      // 連続エラーが多い場合は推論間隔を延長
+      if (this.performanceStats.errorCount > 5) {
+        this.minInferenceInterval = Math.min(1000, this.minInferenceInterval * 1.5);
+        console.warn(`High error rate detected. Increasing inference interval to ${this.minInferenceInterval}ms`);
+      }
+      
       return null;
     }
   }
 
   // Get performance statistics
   getPerformanceStats() {
-    return { ...this.performanceStats };
+    return { 
+      ...this.performanceStats,
+      skipRate: this.performanceStats.skippedFrames / (this.performanceStats.totalInferences + this.performanceStats.skippedFrames) * 100
+    };
+  }
+
+  // 推論間隔を動的調整
+  adjustInferenceInterval(averageTime) {
+    if (averageTime > 100) {
+      this.minInferenceInterval = Math.min(500, this.minInferenceInterval + 50);
+    } else if (averageTime < 50) {
+      this.minInferenceInterval = Math.max(50, this.minInferenceInterval - 10);
+    }
   }
 
   // Reset performance statistics
@@ -265,7 +389,33 @@ class ONNXInferenceEngine {
     this.performanceStats = {
       totalInferences: 0,
       totalTime: 0,
-      averageTime: 0
+      averageTime: 0,
+      skippedFrames: 0,
+      errorCount: 0
+    };
+    this.lastInferenceTime = 0;
+    this.detectionHistory = [];
+    this.minInferenceInterval = 100; // デフォルト値にリセット
+    console.log("ONNX performance stats and detection history reset");
+  }
+  
+  // Set confidence threshold dynamically
+  setConfidenceThreshold(threshold) {
+    this.confidenceThreshold = Math.max(0.1, Math.min(0.9, threshold));
+    console.log(`Confidence threshold set to ${this.confidenceThreshold}`);
+  }
+  
+  // Get detection statistics
+  getDetectionStats() {
+    const recentHistory = this.detectionHistory.slice(-10);
+    const totalDetections = recentHistory.reduce((sum, entry) => sum + entry.detections.length, 0);
+    const avgDetectionsPerFrame = recentHistory.length > 0 ? totalDetections / recentHistory.length : 0;
+    
+    return {
+      historyLength: this.detectionHistory.length,
+      avgDetectionsPerFrame: avgDetectionsPerFrame.toFixed(2),
+      confidenceThreshold: this.confidenceThreshold,
+      minInferenceInterval: this.minInferenceInterval
     };
   }
 
@@ -274,12 +424,27 @@ class ONNXInferenceEngine {
     return this.isWebGPUSupported && this.session;
   }
 
+  // メモリクリーンアップ
+  cleanupMemory() {
+    if (this.inferenceCanvas) {
+      this.inferenceContext = null;
+      this.inferenceCanvas.width = 1;
+      this.inferenceCanvas.height = 1;
+    }
+    
+    // ガベージコレクションの実行を試行
+    if (window.gc) {
+      window.gc();
+    }
+  }
+
   // Dispose of resources
   dispose() {
     if (this.session) {
       this.session.release();
       this.session = null;
     }
+    this.cleanupMemory();
     this.inferenceCanvas = null;
     this.inferenceContext = null;
     console.log("ONNX inference engine disposed");
