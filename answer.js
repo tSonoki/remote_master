@@ -126,6 +126,32 @@ function updateWarningLightStatus(isOn) {
   }
 }
 
+function handleDetectionData(data) {
+  console.log('Received detection data from offer side:', data);
+  
+  // Offer側からの検出データを処理
+  // 自動リセット機能のために人の検出数を監視
+  const personCount = data.c || 0; // count
+  const timestamp = data.ts || Date.now();
+  
+  // 検出データをOffer側に送信して安全システムの状態を同期
+  if (remoteDataChannel && remoteDataChannel.readyState === "open") {
+    try {
+      const syncMessage = {
+        type: "detection_sync",
+        timestamp: timestamp,
+        personCount: personCount,
+        side: "answer"
+      };
+      
+      remoteDataChannel.send(JSON.stringify(syncMessage));
+      console.log(`Detection sync sent: ${personCount} persons detected`);
+    } catch (error) {
+      console.warn("Failed to send detection sync:", error.message);
+    }
+  }
+}
+
 // グローバル関数として登録
 window.toggleCanvas = toggleCanvas;
 
@@ -425,6 +451,10 @@ signalingSocket.onmessage = async (event) => {
             break;
           case "warning_light":
             handleWarningLight(data);
+            break;
+          case "offer_detect":
+            // Offer側からの検知結果（コンパクト形式）
+            handleDetectionData(data);
             break;
           case "videoQualityChange":
             console.log("Received video quality change request:", data.payload); // 受信ログを追加

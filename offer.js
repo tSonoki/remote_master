@@ -46,12 +46,14 @@ class SafetySystem {
     this.confirmationTimeWindow = 2000; // 確認時間窓（ms）
     this.safetyResetTimeout = null;
     this.lastSafetyTrigger = 0;
+    this.noPersonResetTimeout = null; // 人がいなくなった際の自動リセット用タイマー
+    this.lastPersonDetectionTime = 0; // 最後に人を検知した時間
     
     // 安全設定
     this.settings = {
       enabled: false, // 安全システム有効/無効
-      autoReset: false, // 自動リセット機能
-      autoResetDelay: 10000, // 自動リセット遅延（ms）
+      autoReset: true, // 自動リセット機能（デフォルトで有効）
+      autoResetDelay: 5000, // 人がいなくなってからのリセット遅延（ms）
       minimumPersonSize: 1000, // 最小検出サイズ（ピクセル²）
       safetyZoneOnly: false // 安全ゾーンのみ監視
     };
@@ -80,6 +82,17 @@ class SafetySystem {
       return area >= this.settings.minimumPersonSize;
     });
 
+    // 人が検知されている場合、最後の検知時間を更新
+    if (validPersons.length > 0) {
+      this.lastPersonDetectionTime = currentTime;
+      
+      // 人がいる間は自動リセットタイマーをクリア
+      if (this.noPersonResetTimeout) {
+        clearTimeout(this.noPersonResetTimeout);
+        this.noPersonResetTimeout = null;
+      }
+    }
+
     // 検知履歴に追加
     this.personDetectionHistory.push({
       timestamp: currentTime,
@@ -94,6 +107,9 @@ class SafetySystem {
 
     // 安全判定
     this.evaluateSafety();
+    
+    // 安全停止中で人がいなくなった場合の自動リセット処理
+    this.checkForAutoReset(validPersons.length, currentTime);
   }
 
   // 安全状態の評価
@@ -105,6 +121,50 @@ class SafetySystem {
     // 連続検知判定
     if (recentDetections.length >= this.confirmationThreshold && !this.isSafetyTriggered) {
       this.triggerSafety(recentDetections);
+    }
+  }
+
+  // 自動リセットのチェック
+  checkForAutoReset(currentPersonCount, currentTime) {
+    // 安全停止中でない場合は何もしない
+    if (!this.isSafetyTriggered) return;
+    
+    // 自動リセットが無効の場合は何もしない
+    if (!this.settings.autoReset) return;
+
+    // 現在人が検知されている場合は何もしない
+    if (currentPersonCount > 0) return;
+
+    // 過去の確認時間窓内で人が検知されていないかチェック
+    const recentPersonDetections = this.personDetectionHistory.filter(
+      entry => entry.count > 0 && (currentTime - entry.timestamp) <= this.confirmationTimeWindow
+    );
+
+    // まだ人が検知されている履歴がある場合は待機
+    if (recentPersonDetections.length > 0) return;
+
+    // 自動リセットタイマーがまだ設定されていない場合は設定
+    if (!this.noPersonResetTimeout) {
+      console.log(`No person detected. Auto-reset will trigger in ${this.settings.autoResetDelay}ms`);
+      
+      this.noPersonResetTimeout = setTimeout(() => {
+        // タイマー実行時に再度確認
+        const finalCheck = this.personDetectionHistory.filter(
+          entry => entry.count > 0 && (Date.now() - entry.timestamp) <= this.confirmationTimeWindow
+        );
+        
+        if (finalCheck.length === 0) {
+          console.log('🔄 AUTO-RESET: No person detected, resetting safety system');
+          this.resetSafety();
+        } else {
+          console.log('Auto-reset cancelled: Person detected during waiting period');
+          this.noPersonResetTimeout = null;
+          this.updateSafetyStatus(); // UI更新
+        }
+      }, this.settings.autoResetDelay);
+      
+      // UI更新（自動リセット待機状態を表示）
+      this.updateSafetyStatus();
     }
   }
 
@@ -126,24 +186,24 @@ class SafetySystem {
     
     // 安全イベントをログ
     this.logSafetyEvent('TRIGGERED', detections);
-
-    // 自動リセットが有効な場合
-    if (this.settings.autoReset) {
-      this.safetyResetTimeout = setTimeout(() => {
-        this.resetSafety();
-      }, this.settings.autoResetDelay);
-    }
   }
 
-  // 手動安全リセット
+  // 安全リセット（手動・自動共通）
   resetSafety() {
+    // すべてのタイマーをクリア
     if (this.safetyResetTimeout) {
       clearTimeout(this.safetyResetTimeout);
       this.safetyResetTimeout = null;
     }
     
+    if (this.noPersonResetTimeout) {
+      clearTimeout(this.noPersonResetTimeout);
+      this.noPersonResetTimeout = null;
+    }
+    
     this.isSafetyTriggered = false;
     this.personDetectionHistory = [];
+    this.lastPersonDetectionTime = 0;
     
     console.log('✅ Safety system reset');
     
@@ -244,8 +304,13 @@ class SafetySystem {
       statusElement.textContent = "安全システム: 無効";
       statusElement.className = "safety-disabled";
     } else if (this.isSafetyTriggered) {
-      statusElement.textContent = "🚨 緊急停止中 - 人を検知";
-      statusElement.className = "safety-triggered";
+      if (this.noPersonResetTimeout) {
+        statusElement.textContent = "🔄 自動リセット待機中 - 人が検知されなくなりました";
+        statusElement.className = "safety-resetting";
+      } else {
+        statusElement.textContent = "🚨 緊急停止中 - 人を検知";
+        statusElement.className = "safety-triggered";
+      }
     } else {
       statusElement.textContent = "安全システム: 監視中";
       statusElement.className = "safety-active";
@@ -692,6 +757,14 @@ async function startConnection() {
         "Received inference results from answer side:",
         fromAnswerWebRtcData.payload
       );
+    } else if (fromAnswerWebRtcData.type === "detection_sync") {
+      // Answer側からの検出同期データを処理
+      console.log("Received detection sync from answer side:", fromAnswerWebRtcData);
+      
+      // 安全システムが有効かつ検出データがある場合、安全システムに通知
+      if (safetySystem && safetySystem.isEnabled) {
+        safetySystem.checkForAutoReset(fromAnswerWebRtcData.personCount, fromAnswerWebRtcData.timestamp);
+      }
     }
   };
 
