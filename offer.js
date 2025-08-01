@@ -53,7 +53,7 @@ class SafetySystem {
     this.settings = {
       enabled: false, // 安全システム有効/無効
       autoReset: true, // 自動リセット機能（デフォルトで有効）
-      autoResetDelay: 5000, // 人がいなくなってからのリセット遅延（ms）
+      autoResetDelay: 0, // 瞬時リセット（遅延なし）
       minimumPersonSize: 1000, // 最小検出サイズ（ピクセル²）
       safetyZoneOnly: false // 安全ゾーンのみ監視
     };
@@ -145,6 +145,13 @@ class SafetySystem {
 
     // 自動リセットタイマーがまだ設定されていない場合は設定
     if (!this.noPersonResetTimeout) {
+      // 遅延が0の場合は即座に実行
+      if (this.settings.autoResetDelay === 0) {
+        console.log('No person detected. Executing immediate auto-reset');
+        this.resetSafety(true); // 自動リセットフラグ付きで実行
+        return;
+      }
+      
       console.log(`No person detected. Auto-reset will trigger in ${this.settings.autoResetDelay}ms`);
       
       this.noPersonResetTimeout = setTimeout(() => {
