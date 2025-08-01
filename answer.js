@@ -26,16 +26,6 @@ function updateInferenceStatus(status) {
   }
 }
 
-// 検出統計表示更新
-function updateDetectionStats() {
-  const statsElement = document.getElementById("detection-stats");
-  if (!statsElement || !onnxEngine) return;
-  
-  const perfStats = onnxEngine.getPerformanceStats();
-  const detectionStats = onnxEngine.getDetectionStats();
-  
-  statsElement.textContent = `検出統計: 推論${perfStats.totalInferences}回 | 平均${perfStats.averageTime.toFixed(1)}ms | スキップ率${perfStats.skipRate?.toFixed(1) || 0}%`;
-}
 
 // Canvas表示制御（軽量化のため）
 let isCanvasVisible = false;
@@ -45,6 +35,95 @@ function toggleCanvas() {
   isCanvasVisible = checkbox.checked;
   canvas.style.display = isCanvasVisible ? "block" : "none";
   console.log(`Detection Canvas ${isCanvasVisible ? "表示" : "非表示"}`);
+}
+
+// 安全システム処理関数
+function handleEmergencyStop(data) {
+  console.warn('🚨 EMERGENCY STOP RECEIVED:', data);
+  
+  // トラクタ制御システムに停止信号を送信
+  if (autorunSocket && autorunSocket.readyState === WebSocket.OPEN) {
+    const emergencyStopCommand = {
+      type: "emergency_stop",
+      timestamp: data.timestamp,
+      reason: data.reason,
+      action: "immediate_stop"
+    };
+    
+    try {
+      autorunSocket.send(JSON.stringify(emergencyStopCommand));
+      console.log('Emergency stop command sent to tractor control system');
+    } catch (error) {
+      console.error('Failed to send emergency stop to tractor:', error);
+    }
+  } else {
+    console.error('Tractor control connection not available');
+  }
+  
+  // ローカルUIも更新
+  showEmergencyAlert("人を検知しました！トラクタを緊急停止します。");
+}
+
+function handleWarningLight(data) {
+  console.log(`Warning light ${data.action}:`, data);
+  
+  // パトライト制御システムに信号を送信
+  if (autorunSocket && autorunSocket.readyState === WebSocket.OPEN) {
+    const warningLightCommand = {
+      type: "warning_light_control",
+      action: data.action, // "on" or "off"
+      timestamp: data.timestamp,
+      pattern: "emergency" // 点滅パターン
+    };
+    
+    try {
+      autorunSocket.send(JSON.stringify(warningLightCommand));
+      console.log(`Warning light ${data.action} command sent`);
+    } catch (error) {
+      console.error('Failed to send warning light command:', error);
+    }
+  }
+  
+  // ローカルUIも更新
+  updateWarningLightStatus(data.action === "on");
+}
+
+function showEmergencyAlert(message) {
+  // 緊急アラートをブラウザに表示
+  const alertDiv = document.createElement('div');
+  alertDiv.style.cssText = `
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #ff0000;
+    color: white;
+    padding: 20px;
+    border-radius: 10px;
+    z-index: 9999;
+    font-size: 18px;
+    font-weight: bold;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+    animation: pulse 1s infinite;
+  `;
+  alertDiv.textContent = message;
+  
+  document.body.appendChild(alertDiv);
+  
+  // 10秒後に自動削除
+  setTimeout(() => {
+    if (alertDiv.parentNode) {
+      alertDiv.parentNode.removeChild(alertDiv);
+    }
+  }, 10000);
+}
+
+function updateWarningLightStatus(isOn) {
+  const statusElement = document.getElementById("warning-light-status");
+  if (statusElement) {
+    statusElement.textContent = `パトライト: ${isOn ? "点灯中" : "消灯"}`;
+    statusElement.className = isOn ? "warning-on" : "warning-off";
+  }
 }
 
 // グローバル関数として登録
@@ -340,6 +419,12 @@ signalingSocket.onmessage = async (event) => {
                 })
               );
             }
+            break;
+          case "emergency_stop":
+            handleEmergencyStop(data);
+            break;
+          case "warning_light":
+            handleWarningLight(data);
             break;
           case "videoQualityChange":
             console.log("Received video quality change request:", data.payload); // 受信ログを追加

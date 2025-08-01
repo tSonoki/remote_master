@@ -31,6 +31,32 @@
         background-color: #f5e8e8;
         border-radius: 3px;
       }
+      .safety-disabled {
+        color: #666;
+        font-weight: bold;
+        padding: 5px;
+        background-color: #f0f0f0;
+        border-radius: 3px;
+      }
+      .safety-active {
+        color: #0066cc;
+        font-weight: bold;
+        padding: 5px;
+        background-color: #e6f3ff;
+        border-radius: 3px;
+      }
+      .safety-triggered {
+        color: #ff0000;
+        font-weight: bold;
+        padding: 5px;
+        background-color: #ffe6e6;
+        border-radius: 3px;
+        animation: blink 1s infinite;
+      }
+      @keyframes blink {
+        0%, 50% { opacity: 1; }
+        51%, 100% { opacity: 0.5; }
+      }
     </style>
   </head>
   <body>
@@ -115,10 +141,14 @@
     <label for="inference-on">推論オン</label>
     <input type="radio" id="inference-off" name="inference-control" value="off" checked>
     <label for="inference-off">推論オフ</label><br>
-    <div id="inference-status" class="status-disabled">状態: 推論無効</div>
-    <div id="detection-stats" style="font-size: 12px; color: #666; margin-top: 5px;">
-      検出統計: 待機中
-    </div><br>
+    <div id="inference-status" class="status-disabled">状態: 推論無効</div><br>
+    
+    <h2>安全システム</h2>
+    <input type="checkbox" id="safety-enable" onchange="toggleSafety()">
+    <label for="safety-enable">安全システム有効</label><br>
+    <div id="safety-status" class="safety-disabled">安全システム: 無効</div>
+    <button id="safety-reset" onclick="resetSafety()" disabled>緊急リセット</button>
+    <button id="export-safety-logs" onclick="exportSafetyLogs()">安全ログ出力</button><br><br>
     
     <h2>Detection Canvas (1920x1080)</h2>
     <input type="checkbox" id="canvas-toggle" onchange="toggleCanvas()">

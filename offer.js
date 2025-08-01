@@ -36,6 +36,256 @@ let largeDetectionContext = null;
 let isInferenceEnabled = false; // 推論の有効/無効状態（デフォルトオフ）
 let currentDetections = []; // 現在の検出結果を保存
 
+// =====安全システム=====
+class SafetySystem {
+  constructor() {
+    this.isActive = false; // 安全システムの有効/無効
+    this.isSafetyTriggered = false; // 安全停止が発動中かどうか
+    this.personDetectionHistory = []; // 人検知履歴
+    this.confirmationThreshold = 3; // 連続検知回数の閾値
+    this.confirmationTimeWindow = 2000; // 確認時間窓（ms）
+    this.safetyResetTimeout = null;
+    this.lastSafetyTrigger = 0;
+    
+    // 安全設定
+    this.settings = {
+      enabled: false, // 安全システム有効/無効
+      autoReset: false, // 自動リセット機能
+      autoResetDelay: 10000, // 自動リセット遅延（ms）
+      minimumPersonSize: 1000, // 最小検出サイズ（ピクセル²）
+      safetyZoneOnly: false // 安全ゾーンのみ監視
+    };
+  }
+
+  // 安全システムの有効化/無効化
+  setEnabled(enabled) {
+    this.settings.enabled = enabled;
+    if (!enabled) {
+      this.resetSafety();
+    }
+    console.log(`Safety system ${enabled ? 'enabled' : 'disabled'}`);
+    this.updateSafetyStatus();
+  }
+
+  // 人検知結果を処理
+  processDetections(detections) {
+    if (!this.settings.enabled) return;
+
+    const currentTime = Date.now();
+    const personDetections = detections.filter(d => d.classId === 0); // 人のみ
+    
+    // 最小サイズフィルター適用
+    const validPersons = personDetections.filter(person => {
+      const area = person.bbox.width * person.bbox.height;
+      return area >= this.settings.minimumPersonSize;
+    });
+
+    // 検知履歴に追加
+    this.personDetectionHistory.push({
+      timestamp: currentTime,
+      count: validPersons.length,
+      persons: validPersons
+    });
+
+    // 古い履歴を削除（時間窓外）
+    this.personDetectionHistory = this.personDetectionHistory.filter(
+      entry => currentTime - entry.timestamp <= this.confirmationTimeWindow
+    );
+
+    // 安全判定
+    this.evaluateSafety();
+  }
+
+  // 安全状態の評価
+  evaluateSafety() {
+    const recentDetections = this.personDetectionHistory.filter(
+      entry => entry.count > 0
+    );
+
+    // 連続検知判定
+    if (recentDetections.length >= this.confirmationThreshold && !this.isSafetyTriggered) {
+      this.triggerSafety(recentDetections);
+    }
+  }
+
+  // 安全停止の発動
+  triggerSafety(detections) {
+    this.isSafetyTriggered = true;
+    this.lastSafetyTrigger = Date.now();
+    
+    console.warn('🚨 SAFETY TRIGGERED: Person detected!');
+    
+    // トラクタ停止信号を送信
+    this.sendTractorStop();
+    
+    // パトライト点灯信号を送信  
+    this.sendWarningLight(true);
+    
+    // UI更新
+    this.updateSafetyStatus();
+    
+    // 安全イベントをログ
+    this.logSafetyEvent('TRIGGERED', detections);
+
+    // 自動リセットが有効な場合
+    if (this.settings.autoReset) {
+      this.safetyResetTimeout = setTimeout(() => {
+        this.resetSafety();
+      }, this.settings.autoResetDelay);
+    }
+  }
+
+  // 手動安全リセット
+  resetSafety() {
+    if (this.safetyResetTimeout) {
+      clearTimeout(this.safetyResetTimeout);
+      this.safetyResetTimeout = null;
+    }
+    
+    this.isSafetyTriggered = false;
+    this.personDetectionHistory = [];
+    
+    console.log('✅ Safety system reset');
+    
+    // パトライト消灯
+    this.sendWarningLight(false);
+    
+    // UI更新
+    this.updateSafetyStatus();
+    
+    // 安全イベントをログ
+    this.logSafetyEvent('RESET', []);
+  }
+
+  // トラクタ停止信号送信
+  sendTractorStop() {
+    const stopSignal = {
+      type: "emergency_stop",
+      timestamp: Date.now(),
+      reason: "person_detected"
+    };
+
+    // WebRTCデータチャネル経由で送信
+    if (dataChannel && dataChannel.readyState === "open") {
+      try {
+        dataChannel.send(JSON.stringify(stopSignal));
+        console.log('Emergency stop signal sent');
+      } catch (error) {
+        console.error('Failed to send emergency stop:', error);
+      }
+    }
+
+    // WebSocket経由でも送信（バックアップ）
+    if (signalingWebSocket && signalingWebSocket.readyState === WebSocket.OPEN) {
+      try {
+        signalingWebSocket.send(JSON.stringify({
+          type: "safety_alert",
+          payload: stopSignal
+        }));
+      } catch (error) {
+        console.error('Failed to send safety alert via WebSocket:', error);
+      }
+    }
+  }
+
+  // パトライト制御信号送信
+  sendWarningLight(activate) {
+    const lightSignal = {
+      type: "warning_light",
+      action: activate ? "on" : "off",
+      timestamp: Date.now()
+    };
+
+    // WebRTCデータチャネル経由で送信
+    if (dataChannel && dataChannel.readyState === "open") {
+      try {
+        dataChannel.send(JSON.stringify(lightSignal));
+        console.log(`Warning light ${activate ? 'activated' : 'deactivated'}`);
+      } catch (error) {
+        console.error('Failed to send warning light signal:', error);
+      }
+    }
+  }
+
+  // 安全イベントのログ記録
+  logSafetyEvent(eventType, detections) {
+    const event = {
+      timestamp: new Date().toISOString(),
+      type: eventType,
+      personCount: detections.length,
+      detections: detections.map(d => ({
+        confidence: d.confidence,
+        bbox: d.bbox
+      }))
+    };
+
+    // ローカルストレージに保存
+    try {
+      const existingLogs = JSON.parse(localStorage.getItem('safetyLogs') || '[]');
+      existingLogs.push(event);
+      
+      // 最新100件のみ保持
+      if (existingLogs.length > 100) {
+        existingLogs.splice(0, existingLogs.length - 100);
+      }
+      
+      localStorage.setItem('safetyLogs', JSON.stringify(existingLogs));
+    } catch (error) {
+      console.error('Failed to save safety log:', error);
+    }
+  }
+
+  // UI状態更新
+  updateSafetyStatus() {
+    const statusElement = document.getElementById("safety-status");
+    if (!statusElement) return;
+
+    if (!this.settings.enabled) {
+      statusElement.textContent = "安全システム: 無効";
+      statusElement.className = "safety-disabled";
+    } else if (this.isSafetyTriggered) {
+      statusElement.textContent = "🚨 緊急停止中 - 人を検知";
+      statusElement.className = "safety-triggered";
+    } else {
+      statusElement.textContent = "安全システム: 監視中";
+      statusElement.className = "safety-active";
+    }
+  }
+
+  // 安全ログのエクスポート
+  exportSafetyLogs() {
+    try {
+      const logs = JSON.parse(localStorage.getItem('safetyLogs') || '[]');
+      if (logs.length === 0) {
+        console.log('No safety logs to export');
+        return;
+      }
+
+      const csv = [
+        'timestamp,event_type,person_count,detection_details',
+        ...logs.map(log => 
+          `${log.timestamp},${log.type},${log.personCount},"${JSON.stringify(log.detections)}"`
+        )
+      ].join('\n');
+
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `safety_logs_${new Date().toISOString().split('T')[0]}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      
+      console.log(`Exported ${logs.length} safety logs`);
+    } catch (error) {
+      console.error('Failed to export safety logs:', error);
+    }
+  }
+}
+
+// 安全システムインスタンスを作成
+const safetySystem = new SafetySystem();
+
 // ステータス表示更新
 function updateInferenceStatus(status) {
   const statusElement = document.getElementById("inference-status");
@@ -45,18 +295,6 @@ function updateInferenceStatus(status) {
   }
 }
 
-// 検出統計表示更新
-function updateDetectionStats() {
-  const statsElement = document.getElementById("detection-stats");
-  if (!statsElement || !onnxEngine) return;
-  
-  const perfStats = onnxEngine.getPerformanceStats();
-  const detectionStats = onnxEngine.getDetectionStats();
-  const currentDetectionCount = currentDetections ? currentDetections.length : 0;
-  const personCount = currentDetections ? currentDetections.filter(d => d.classId === 0).length : 0;
-  
-  statsElement.textContent = `検出統計: 人${personCount}名 | 推論${perfStats.totalInferences}回 | 平均${perfStats.averageTime.toFixed(1)}ms | スキップ率${perfStats.skipRate?.toFixed(1) || 0}%`;
-}
 
 // Canvas表示制御（軽量化のため）
 let isCanvasVisible = false;
@@ -68,8 +306,28 @@ function toggleCanvas() {
   console.log(`Detection Canvas ${isCanvasVisible ? "表示" : "非表示"}`);
 }
 
+// 安全システム制御関数
+function toggleSafety() {
+  const checkbox = document.getElementById("safety-enable");
+  const resetButton = document.getElementById("safety-reset");
+  
+  safetySystem.setEnabled(checkbox.checked);
+  resetButton.disabled = !checkbox.checked;
+}
+
+function resetSafety() {
+  safetySystem.resetSafety();
+}
+
+function exportSafetyLogs() {
+  safetySystem.exportSafetyLogs();
+}
+
 // グローバル関数として登録
 window.toggleCanvas = toggleCanvas;
+window.toggleSafety = toggleSafety;
+window.resetSafety = resetSafety;
+window.exportSafetyLogs = exportSafetyLogs;
 
 // Initialize ONNX model with WebGPU acceleration
 async function initONNXModel() {
@@ -214,10 +472,8 @@ function startVideoInference(videoElement) {
             // Update current detections for video-canvas rendering
             currentDetections = results.detections;
             
-            // リアルタイム統計表示更新（30フレームごと）
-            if (inferenceCount % 30 === 0) {
-              updateDetectionStats();
-            }
+            // 安全システムに検出結果を送信
+            safetySystem.processDetections(results.detections);
             
             // Draw bounding boxes on large canvas（表示時のみ）
             if (isCanvasVisible) {
