@@ -513,9 +513,22 @@ function drawBoundingBoxesOnLargeCanvas(detections) {
 
 // Run ONNX inference using the inference engine
 async function runInference(videoElement) {
-  if (!onnxEngine || !videoElement || videoElement.videoWidth === 0) return null;
+  console.log("=== OFFER SIDE INFERENCE DEBUG ===");
+  console.log("onnxEngine exists:", !!onnxEngine);
+  console.log("videoElement exists:", !!videoElement);
+  console.log("videoElement.videoWidth:", videoElement?.videoWidth);
+  console.log("videoElement.videoHeight:", videoElement?.videoHeight);
+  console.log("videoElement.readyState:", videoElement?.readyState);
   
-  return await onnxEngine.runInference(videoElement, "offer");
+  if (!onnxEngine || !videoElement || videoElement.videoWidth === 0) {
+    console.log("OFFER SIDE: Inference conditions not met");
+    return null;
+  }
+  
+  console.log("OFFER SIDE: Running inference...");
+  const result = await onnxEngine.runInference(videoElement, "offer");
+  console.log("OFFER SIDE: Inference result:", result);
+  return result;
 }
 
 // Performance monitoring variables for offer side
@@ -536,7 +549,9 @@ function startVideoInference(videoElement) {
       }
 
       // Only run inference if enabled and not already busy
+      console.log("OFFER INFERENCE LOOP: isInferenceEnabled =", isInferenceEnabled, "isInferenceBusy =", isInferenceBusy);
       if (isInferenceEnabled && !isInferenceBusy) {
+        console.log("OFFER: Starting inference...");
         isInferenceBusy = true;
         try {
           const results = await runInference(videoElement);
@@ -777,11 +792,16 @@ async function startConnection() {
 
   const remoteStream = new MediaStream();
   peerConnection.ontrack = (event) => {
+    console.log("OFFER: Received track from Answer side:", event.track);
     remoteStream.addTrack(event.track);
     videoElement.srcObject = remoteStream;
+    console.log("OFFER: Video element srcObject set");
 
     videoElement.addEventListener("loadeddata", async () => {
+      console.log("OFFER: Video loadeddata event fired");
+      console.log("OFFER: Video dimensions:", videoElement.videoWidth, "x", videoElement.videoHeight);
       await initONNXModel();
+      console.log("OFFER: Starting video inference loop");
       startVideoInference(videoElement);
       
       const inferenceOnRadio = document.getElementById("inference-on");

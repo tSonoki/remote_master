@@ -7,15 +7,15 @@ class ONNXInferenceEngine {
     this.inferenceCanvas = null;
     this.inferenceContext = null;
     this.isWebGPUSupported = false;
-    this.modelPath = './best.onnx';
-    // this.modelPath = "./yolo11n.onnx"; 
+    // this.modelPath = './best.onnx';
+    this.modelPath = "./yolo11n.onnx"; 
     this.lastInferenceTime = 0;
     this.minInferenceInterval = 100; // 最小推論間隔（ms）
     
     // 検出結果の安定化フィルタ
     this.detectionHistory = []; // 過去の検出結果を保存
     this.maxHistoryLength = 5; // 保存する履歴の最大長
-    this.confidenceThreshold = 0.3; // 最小信頼度閾値
+    this.confidenceThreshold = 0.1; // 最小信頼度閾値（デバッグ用に下げる）
     
     // Performance monitoring
     this.performanceStats = {
@@ -140,57 +140,113 @@ class ONNXInferenceEngine {
   }
 
   // Parse detection results with stability filtering
+  // 既存の parseDetectionResults 関数を、この新しいコードで完全に置き換えてください
   parseDetectionResults(results) {
-    const output = results.output0;
+    const outputKey = Object.keys(results)[0];
+    const output = results[outputKey];
     if (!output) {
-      console.log("Available output keys:", Object.keys(results));
-      return this.stabilizeDetections([]);
+        console.error("No output found from model!");
+        return [];
     }
 
     const outputData = output.data;
-    const outputShape = output.dims; // [1, 300, 6] for your model
-    
-    const rawDetections = [];
-    const numDetections = outputShape[1]; // 300
-    const numFeatures = outputShape[2]; // 6 (x1, y1, x2, y2, confidence, class_id)
+    const outputShape = output.dims; // [1, 84, 8400]
 
-    // Your model format: [x1, y1, x2, y2, confidence, class_id]
+    const boxes = [];
+    const numDetections = outputShape[2]; // 8400
+    const numClasses = outputShape[1] - 4; // 84 - 4 = 80
+
+    // データを行列のように扱い、各検出候補を正しく組み立てる
     for (let i = 0; i < numDetections; i++) {
-      const startIdx = i * numFeatures;
+        // 各検出候補(i)のデータを取得
+        const cx = outputData[i];
+        const cy = outputData[i + numDetections];
+        const w = outputData[i + 2 * numDetections];
+        const h = outputData[i + 3 * numDetections];
 
-      const x1 = outputData[startIdx + 0];
-      const y1 = outputData[startIdx + 1];
-      const x2 = outputData[startIdx + 2];
-      const y2 = outputData[startIdx + 3];
-      const confidence = outputData[startIdx + 4];
-      const classId = Math.round(outputData[startIdx + 5]);
-
-      // 人のみ検出（classId = 0）し、動的信頼度閾値でフィルタ
-      if (classId === 0 && confidence > this.confidenceThreshold && 
-          x1 >= 0 && y1 >= 0 && x2 > x1 && y2 > y1 && 
-          x2 <= 640 && y2 <= 640) {
-        
-        const width = x2 - x1;
-        const height = y2 - y1;
-        
-        // 最小サイズフィルタ（ノイズ除去）
-        if (width > 10 && height > 10) {
-          const detection = {
-            bbox: { x: x1, y: y1, width: width, height: height },
-            confidence: confidence,
-            classId: classId,
-            x1: x1, y1: y1, x2: x2, y2: y2,
-            timestamp: Date.now()
-          };
-          rawDetections.push(detection);
+        const classScores = [];
+        for (let j = 0; j < numClasses; j++) {
+            // 各クラスのスコアを取得
+            classScores.push(outputData[i + (4 + j) * numDetections]);
         }
-      }
+        
+        // 最もスコアの高いクラスとそのスコアを見つける
+        let maxScore = 0;
+        let classId = -1;
+        for (let j = 0; j < classScores.length; j++) {
+            if (classScores[j] > maxScore) {
+                maxScore = classScores[j];
+                classId = j;
+            }
+        }
+        
+        // 信頼度がしきい値を超え、かつ「人」(classId: 0) の場合のみ採用
+        if (maxScore > this.confidenceThreshold && classId === 0) {
+            boxes.push({
+                classId: classId,
+                confidence: maxScore,
+                box: [
+                    cx - w / 2, // x1
+                    cy - h / 2, // y1
+                    cx + w / 2, // x2
+                    cy + h / 2, // y2
+                ],
+            });
+        }
     }
+    
+    // Non-Maximum Suppression (重複ボックスの除去) を適用
+    return this.nonMaxSuppression(boxes, 0.5); 
+}
+// parseDetectionResults 関数の直後などに、この新しい関数を追加してください
+nonMaxSuppression(boxes, iouThreshold) {
+    if (boxes.length === 0) return [];
 
-    // 検出結果の安定化フィルタを適用
-    return this.stabilizeDetections(rawDetections);
-  }
+    // 信頼度でボックスを降順にソート
+    boxes.sort((a, b) => b.confidence - a.confidence);
 
+    const keptBoxes = [];
+    while (boxes.length > 0) {
+        const currentBox = boxes.shift();
+        keptBoxes.push(currentBox);
+        
+        boxes = boxes.filter(box => {
+            if (box.classId !== currentBox.classId) {
+                return true;
+            }
+            
+            // IoU (Intersection over Union) を計算
+            const [x1, y1, x2, y2] = currentBox.box;
+            const [ox1, oy1, ox2, oy2] = box.box;
+            
+            const interX1 = Math.max(x1, ox1);
+            const interY1 = Math.max(y1, oy1);
+            const interX2 = Math.min(x2, ox2);
+            const interY2 = Math.min(y2, oy2);
+            
+            const interArea = Math.max(0, interX2 - interX1) * Math.max(0, interY2 - interY1);
+            const boxArea = (x2 - x1) * (y2 - y1);
+            const otherBoxArea = (ox2 - ox1) * (oy2 - oy1);
+            const unionArea = boxArea + otherBoxArea - interArea;
+            
+            const iou = interArea / unionArea;
+            
+            return iou <= iouThreshold;
+        });
+    }
+    
+    // 最終的な検出結果を整形
+    return keptBoxes.map(b => ({
+        bbox: {
+            x: b.box[0],
+            y: b.box[1],
+            width: b.box[2] - b.box[0],
+            height: b.box[3] - b.box[1],
+        },
+        confidence: b.confidence,
+        classId: b.classId,
+    }));
+}
   // 検出結果の安定化フィルタ
   stabilizeDetections(currentDetections) {
     // 履歴に現在の検出結果を追加
