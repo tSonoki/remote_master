@@ -8,6 +8,7 @@ class ONNXInferenceEngine {
     this.inferenceContext = null;
     this.isWebGPUSupported = false;
     this.modelPath = './best.onnx';
+    // this.modelPath = "./yolo11n.onnx"; 
     this.lastInferenceTime = 0;
     this.minInferenceInterval = 100; // 最小推論間隔（ms）
     
@@ -164,8 +165,8 @@ class ONNXInferenceEngine {
       const confidence = outputData[startIdx + 4];
       const classId = Math.round(outputData[startIdx + 5]);
 
-      // 動的信頼度閾値でフィルタ（基本的な妥当性チェック付き）
-      if (confidence > this.confidenceThreshold && 
+      // 人のみ検出（classId = 0）し、動的信頼度閾値でフィルタ
+      if (classId === 0 && confidence > this.confidenceThreshold && 
           x1 >= 0 && y1 >= 0 && x2 > x1 && y2 > y1 && 
           x2 <= 640 && y2 <= 640) {
         
