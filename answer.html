@@ -17,6 +17,99 @@
       max-width: 100%;
       height: auto;
     }
+    
+    /* Detection Canvas全画面表示用スタイル */
+    #large-detection-canvas {
+      max-width: 90vw;
+      max-height: 90vh;
+      object-fit: contain;
+    }
+    
+    #large-detection-canvas.fullscreen {
+      position: fixed !important;
+      top: 0 !important;
+      left: 0 !important;
+      width: 100vw !important;
+      height: 100vh !important;
+      max-width: 100vw !important;
+      max-height: 100vh !important;
+      z-index: 9999 !important;
+      background-color: black !important;
+      object-fit: contain !important;
+      cursor: pointer !important;
+      display: block !important;
+      border: none !important;
+    }
+    
+    /* 全体レイアウト改善 */
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      background-color: #f5f5f5;
+    }
+    
+    .main-container {
+      display: grid;
+      grid-template-columns: 1fr 300px;
+      gap: 20px;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    
+    .left-panel {
+      background-color: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    
+    .right-panel {
+      background-color: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    
+    .control-section {
+      margin-bottom: 20px;
+      padding: 15px;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      background-color: #fafafa;
+    }
+    
+    .control-section h2 {
+      margin-top: 0;
+      color: #333;
+      border-bottom: 2px solid #007bff;
+      padding-bottom: 5px;
+    }
+    
+    button {
+      background-color: #007bff;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 5px;
+    }
+    
+    button:hover {
+      background-color: #0056b3;
+    }
+    
+    button:disabled {
+      background-color: #6c757d;
+      cursor: not-allowed;
+    }
+    
+    input, select {
+      margin: 5px;
+      padding: 5px;
+      border: 1px solid #ddd;
+      border-radius: 3px;
+    }
     .status-enabled {
       color: #008000;
       font-weight: bold;
@@ -34,29 +127,51 @@
   </style>
 </head>
 <body>
-  <h1>WebRTC Peer Connection Sample</h1>
-  <video id="local-video" autoplay playsinline></video>
-  <br>
-  SelectDevice:<select id="camera-select" disabled> </select><br>
-  VideoHeight:<input type="number" id="video-height" max="4320" value="1080"><br>
-  VideoWidth:<input type="number" id="video-width" max="7680" value="1920"><br>
-  FrameRate:<input type="number" id="video-rate" min="1" max="60" value="30">Hz<br>
-  <button id="stream-capture">Get Capture</button><br>
-  <br>
-  <button id="save-delay-log">詳細WebRTC統計を保存</button>
-  <button id="clear-stats">統計データクリア</button>
-  <br><br>
+  <h1>WebRTC Peer Connection Sample (Answer)</h1>
   
-  <h2>ONNX Inference Control</h2>
-  <input type="radio" id="inference-on" name="inference-control" value="on">
-  <label for="inference-on">推論オン</label>
-  <input type="radio" id="inference-off" name="inference-control" value="off" checked>
-  <label for="inference-off">推論オフ</label><br>
-  <div id="inference-status" class="status-disabled">状態: 推論無効</div><br>
+  <div class="main-container">
+    <div class="left-panel">
+      <div class="control-section">
+        <h2>Camera Stream</h2>
+        <video id="local-video" autoplay playsinline></video>
+        <br>
+        SelectDevice:<select id="camera-select" disabled> </select><br>
+        <button id="stream-capture">Get Capture</button>
+      </div>
+      
+      <div class="control-section">
+        <h2>Video Quality Settings</h2>
+        VideoHeight:<input type="number" id="video-height" max="4320" value="1080"><br>
+        VideoWidth:<input type="number" id="video-width" max="7680" value="1920"><br>
+        FrameRate:<input type="number" id="video-rate" min="1" max="60" value="30">Hz<br>
+      </div>
+      
+      <div class="control-section">
+        <h2>Statistics & Logs</h2>
+        <button id="save-delay-log">詳細WebRTC統計を保存</button>
+        <button id="clear-stats">統計データクリア</button>
+      </div>
+    </div>
+    
+    <div class="right-panel">
+      <div class="control-section">
+        <h2>ONNX Inference Control</h2>
+        <input type="radio" id="inference-on" name="inference-control" value="on">
+        <label for="inference-on">推論オン</label>
+        <input type="radio" id="inference-off" name="inference-control" value="off" checked>
+        <label for="inference-off">推論オフ</label><br>
+        <div id="inference-status" class="status-disabled">状態: 推論無効</div>
+      </div>
+      
+      <div class="control-section">
+        <h2>Detection Canvas (1920x1080)</h2>
+        <input type="checkbox" id="canvas-toggle" onchange="toggleCanvas()">
+        <label for="canvas-toggle">Detection Canvas表示</label>
+        <button id="canvas-fullscreen-btn" onclick="toggleCanvasFullscreen()" style="display: none;">全画面表示</button><br><br>
+      </div>
+    </div>
+  </div>
   
-  <h2>Detection Canvas (1920x1080)</h2>
-  <input type="checkbox" id="canvas-toggle" onchange="toggleCanvas()">
-  <label for="canvas-toggle">Detection Canvas表示</label><br><br>
   <canvas id="large-detection-canvas" width="1920" height="1080" style="display: none;"></canvas>
 </body>
 </html>

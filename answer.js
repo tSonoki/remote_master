@@ -29,12 +29,77 @@ function updateInferenceStatus(status) {
 
 // Canvas表示制御（軽量化のため）
 let isCanvasVisible = false;
+let isCanvasFullscreen = false;
+
 function toggleCanvas() {
   const canvas = document.getElementById("large-detection-canvas");
   const checkbox = document.getElementById("canvas-toggle");
+  const fullscreenBtn = document.getElementById("canvas-fullscreen-btn");
+  
   isCanvasVisible = checkbox.checked;
   canvas.style.display = isCanvasVisible ? "block" : "none";
+  fullscreenBtn.style.display = isCanvasVisible ? "inline-block" : "none";
+  
   console.log(`Detection Canvas ${isCanvasVisible ? "表示" : "非表示"}`);
+}
+
+function toggleCanvasFullscreen() {
+  const canvas = document.getElementById("large-detection-canvas");
+  const fullscreenBtn = document.getElementById("canvas-fullscreen-btn");
+  
+  if (!isCanvasFullscreen) {
+    // 全画面表示にする
+    canvas.classList.add("fullscreen");
+    fullscreenBtn.textContent = "全画面終了";
+    isCanvasFullscreen = true;
+    
+    // bodyのスクロールを無効化
+    document.body.style.overflow = "hidden";
+    
+    // ESCキーで全画面終了
+    const handleEscKey = (e) => {
+      if (e.key === "Escape" && isCanvasFullscreen) {
+        exitFullscreen();
+      }
+    };
+    
+    // クリックで全画面終了
+    const handleCanvasClick = (e) => {
+      // canvas上でのクリックで全画面終了
+      exitFullscreen();
+    };
+    
+    // イベントリスナーを追加
+    document.addEventListener("keydown", handleEscKey);
+    canvas.addEventListener("click", handleCanvasClick);
+    
+    // 終了関数を定義
+    const exitFullscreen = () => {
+      canvas.classList.remove("fullscreen");
+      fullscreenBtn.textContent = "全画面表示";
+      isCanvasFullscreen = false;
+      document.body.style.overflow = "";
+      
+      // イベントリスナーを削除
+      document.removeEventListener("keydown", handleEscKey);
+      canvas.removeEventListener("click", handleCanvasClick);
+      
+      console.log("Detection Canvas 通常表示");
+    };
+    
+    // 全画面終了関数をボタンにも設定
+    fullscreenBtn.onclick = exitFullscreen;
+    
+  } else {
+    // 全画面表示を終了（直接呼び出し用）
+    canvas.classList.remove("fullscreen");
+    fullscreenBtn.textContent = "全画面表示";
+    isCanvasFullscreen = false;
+    document.body.style.overflow = "";
+    fullscreenBtn.onclick = toggleCanvasFullscreen;
+  }
+  
+  console.log(`Detection Canvas ${isCanvasFullscreen ? "全画面表示" : "通常表示"}`);
 }
 
 // 安全システム処理関数
@@ -154,6 +219,7 @@ function handleDetectionData(data) {
 
 // グローバル関数として登録
 window.toggleCanvas = toggleCanvas;
+window.toggleCanvasFullscreen = toggleCanvasFullscreen;
 
 // Initialize ONNX model with WebGPU acceleration
 async function initONNXModel() {
