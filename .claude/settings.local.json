@@ -12,6 +12,7 @@
       "Bash(pip uninstall:*)",
       "Bash(rm:*)"
     ],
-    "deny": []
+    "deny": [],
+    "defaultMode": "acceptEdits"
   }
 }
